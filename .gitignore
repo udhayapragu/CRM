@@ -1,0 +1,15 @@
+node_modules/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+.env
+.env.local
+.env.*.local
+.env.test
+uploads/
+!uploads/.gitkeep
+npm-debug.log*
+.DS_Store
+luxe-crm-source.zip

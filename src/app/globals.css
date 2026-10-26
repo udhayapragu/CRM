@@ -1,0 +1,128 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design tokens (RGB triplets). Dark is the default luxury theme. */
+:root,
+:root.dark {
+  --bg: 8 6 13;
+  --surface: 17 13 26;
+  --surface-2: 24 18 36;
+  --surface-3: 34 26 50;
+  --line: 62 48 92;
+  --fg: 238 234 247;
+  --muted: 160 151 184;
+  --subtle: 112 103 138;
+  --brand: 139 92 246;
+  --brand-soft: 76 29 149;
+  --brand-strong: 167 139 250;
+  --gold: 212 175 55;
+  --gold-soft: 120 96 28;
+  --success: 52 211 153;
+  --warning: 251 191 36;
+  --danger: 248 113 113;
+  --info: 96 165 250;
+  color-scheme: dark;
+}
+
+:root.light {
+  --bg: 248 246 252;
+  --surface: 255 255 255;
+  --surface-2: 246 243 251;
+  --surface-3: 236 231 246;
+  --line: 226 220 238;
+  --fg: 26 20 38;
+  --muted: 98 90 120;
+  --subtle: 140 132 160;
+  --brand: 109 40 217;
+  --brand-soft: 237 233 254;
+  --brand-strong: 91 33 182;
+  --gold: 168 132 22;
+  --gold-soft: 250 240 205;
+  --success: 5 150 105;
+  --warning: 180 115 0;
+  --danger: 220 38 38;
+  --info: 37 99 235;
+  color-scheme: light;
+}
+
+html,
+body {
+  background: rgb(var(--bg));
+  color: rgb(var(--fg));
+}
+
+body {
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+
+.dark body {
+  background-image:
+    radial-gradient(1200px 600px at 85% -10%, rgb(var(--brand) / 0.12), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgb(var(--gold) / 0.06), transparent 60%);
+  background-attachment: fixed;
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-line/60 bg-surface shadow-card;
+  }
+  .card-pad {
+    @apply p-5;
+  }
+  .gold-text {
+    background: linear-gradient(120deg, rgb(var(--gold)) 0%, #f6e7b0 45%, rgb(var(--gold)) 90%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .table-base {
+    @apply w-full text-sm;
+  }
+  .table-base thead th {
+    @apply whitespace-nowrap border-b border-line/60 px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-subtle;
+  }
+  .table-base tbody td {
+    @apply border-b border-line/30 px-3 py-3 align-middle;
+  }
+  .table-base tbody tr {
+    @apply transition-colors hover:bg-surface-2/70;
+  }
+  .input {
+    @apply h-10 w-full rounded-xl border border-line/80 bg-surface-2 px-3 text-sm text-fg placeholder:text-subtle outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/30 disabled:opacity-60;
+  }
+  .label {
+    @apply mb-1.5 block text-xs font-medium text-muted;
+  }
+}
+
+/* Thin, elegant scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--line)) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.recharts-cartesian-axis-tick-value {
+  fill: rgb(var(--subtle));
+  font-size: 11px;
+}
+.recharts-cartesian-grid line {
+  stroke: rgb(var(--line) / 0.5);
+}
+
+/* Deeper gold in light mode so gradient text keeps enough contrast on white */
+.light .gold-text {
+  background: linear-gradient(120deg, #7a5c08 0%, #b8891c 50%, #7a5c08 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+}

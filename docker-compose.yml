@@ -1,0 +1,44 @@
+# Local/self-hosted stack: PostgreSQL + web app + background worker.
+# Usage: cp .env.example .env  (fill APP_ENCRYPTION_KEY, SETUP_TOKEN, CRON_SECRET)  →  docker compose up -d --build
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: luxe
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-luxe_password}
+      POSTGRES_DB: luxe_crm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U luxe -d luxe_crm"]
+      interval: 5s
+      retries: 10
+
+  web:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://luxe:${POSTGRES_PASSWORD:-luxe_password}@db:5432/luxe_crm?schema=public
+    ports:
+      - "3000:3000"
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://luxe:${POSTGRES_PASSWORD:-luxe_password}@db:5432/luxe_crm?schema=public
+    command: ["npx", "tsx", "scripts/worker.ts"]
+    depends_on:
+      - web
+
+volumes:
+  pgdata:
+  uploads:
