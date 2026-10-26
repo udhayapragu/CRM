@@ -4,9 +4,14 @@ import { safeEqual } from "@/lib/crypto";
 import { tick } from "@/server/integrations/wordpress/job-runner";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 /** External scheduler entry point: `curl -X POST -H "Authorization: Bearer $CRON_SECRET" $APP_URL/api/cron/tick` */
+/** Vercel Cron calls this with GET and `Authorization: Bearer $CRON_SECRET`. */
+export async function GET(req: NextRequest) {
+  return POST(req);
+}
+
 export async function POST(req: NextRequest) {
   const secret = env.cronSecret;
   const auth = req.headers.get("authorization") ?? "";

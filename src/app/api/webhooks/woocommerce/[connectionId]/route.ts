@@ -2,6 +2,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { rateLimit } from "@/lib/rate-limit";
 import { handleWooWebhook } from "@/server/integrations/wordpress/webhooks";
 
+export const maxDuration = 60;
+
 export const dynamic = "force-dynamic";
 
 /** Public endpoint for WooCommerce webhooks — authenticated by HMAC signature, not by session. */

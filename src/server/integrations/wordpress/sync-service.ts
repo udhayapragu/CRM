@@ -40,6 +40,28 @@ export interface SyncStats {
 
 export const emptyStats = (): SyncStats => ({ pages: 0, fetched: 0, created: 0, updated: 0, unchanged: 0, ignored: 0, failed: 0, errors: [] });
 
+/** Options for one sync phase. `deadline` time-boxes the run; the phase then throws SyncPaused. */
+export interface PhaseOptions {
+  full: boolean;
+  startPage?: number;
+  stats?: SyncStats;
+  /** When this job first started (resumed runs keep the original time). */
+  runStartedAt?: Date;
+  deadline?: number;
+}
+
+/** Thrown when a phase stops at a page boundary because its time budget ran out. */
+export class SyncPaused extends Error {
+  constructor(
+    public phase: "products" | "orders",
+    public nextPage: number,
+    public stats: SyncStats,
+  ) {
+    super(`Paused before ${phase} page ${nextPage}`);
+    this.name = "SyncPaused";
+  }
+}
+
 export interface SyncContext {
   connection: WordPressConnection;
   adapter: SourceAdapter;
@@ -152,22 +174,21 @@ export async function markProductDeletedAtSource(connectionId: string, externalI
   return res.count;
 }
 
-export async function syncProducts(ctx: SyncContext, opts: { full: boolean }): Promise<SyncStats> {
-  const stats = emptyStats();
+export async function syncProducts(ctx: SyncContext, opts: PhaseOptions): Promise<SyncStats> {
+  const stats = opts.stats ?? emptyStats();
   const since = opts.full ? null : ctx.connection.productsCursor;
   const perPage = Math.min(100, Math.max(10, ctx.connection.perPage));
-  const seen = new Set<string>();
+  const runStartedAt = opts.runStartedAt ?? new Date();
   const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  let page = 1;
+  let page = opts.startPage ?? 1;
   let totalPages = 1;
-  await ctx.log("info", `Product sync started (${since ? `changes since ${since.toISOString()}` : "full import"})`);
+  await ctx.log("info", page > 1 ? `Product sync resumed at page ${page}` : `Product sync started (${since ? `changes since ${since.toISOString()}` : "full import"})`);
   do {
     const res = await ctx.adapter.listProducts(page, perPage, since);
     totalPages = res.totalPages;
     stats.pages++;
     stats.fetched += res.items.length;
     for (const p of res.items) {
-      seen.add(p.externalId);
       try {
         const variants = p.hasVariations ? await ctx.adapter.listVariations(p.externalId, p.name) : null;
         const outcome = await upsertProduct(ctx.connection, p, variants);
@@ -181,13 +202,15 @@ export async function syncProducts(ctx: SyncContext, opts: { full: boolean }): P
     }
     if (page % 5 === 0) await ctx.log("info", `Products: page ${page}/${totalPages} processed`);
     page++;
+    if (page <= totalPages && opts.deadline && Date.now() > opts.deadline) throw new SyncPaused("products", page, stats);
     if (page <= totalPages && ctx.pageDelayMs) await sleep(ctx.pageDelayMs);
   } while (page <= totalPages);
 
   // Full import that completed: flag catalogue items that no longer exist on the website (never deleted).
+  // Every product seen during this run had its syncedAt refreshed, so anything older was not returned.
   if (opts.full && stats.failed === 0) {
     const missing = await prisma.product.updateMany({
-      where: { connectionId: ctx.connection.id, externalId: { notIn: [...seen] }, deletedAtSource: null },
+      where: { connectionId: ctx.connection.id, deletedAtSource: null, OR: [{ syncedAt: null }, { syncedAt: { lt: runStartedAt } }] },
       data: { deletedAtSource: new Date() },
     });
     if (missing.count) await ctx.log("warn", `${missing.count} product(s) no longer exist on the website and were flagged (not deleted)`);
@@ -404,8 +427,8 @@ export async function flagOrderDeletedAtSource(connectionId: string, externalId:
   return true;
 }
 
-export async function syncOrders(ctx: SyncContext, opts: { full: boolean }): Promise<SyncStats> {
-  const stats = emptyStats();
+export async function syncOrders(ctx: SyncContext, opts: PhaseOptions): Promise<SyncStats> {
+  const stats = opts.stats ?? emptyStats();
   if (!ctx.adapter.supportsOrders) {
     await ctx.log("info", "Order sync skipped: this connection type has no orders (WooCommerce not in use)");
     return stats;
@@ -414,9 +437,9 @@ export async function syncOrders(ctx: SyncContext, opts: { full: boolean }): Pro
   const perPage = Math.min(100, Math.max(10, ctx.connection.perPage));
   const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const notifyNew = !!since; // do not flood notifications during the initial import
-  let page = 1;
+  let page = opts.startPage ?? 1;
   let totalPages = 1;
-  await ctx.log("info", `Order sync started (${since ? `changes since ${since.toISOString()}` : "full import"})`);
+  await ctx.log("info", page > 1 ? `Order sync resumed at page ${page}` : `Order sync started (${since ? `changes since ${since.toISOString()}` : "full import"})`);
   do {
     const res = await ctx.adapter.listOrders(page, perPage, since);
     totalPages = res.totalPages;
@@ -435,6 +458,7 @@ export async function syncOrders(ctx: SyncContext, opts: { full: boolean }): Pro
     }
     if (page % 5 === 0) await ctx.log("info", `Orders: page ${page}/${totalPages} processed`);
     page++;
+    if (page <= totalPages && opts.deadline && Date.now() > opts.deadline) throw new SyncPaused("orders", page, stats);
     if (page <= totalPages && ctx.pageDelayMs) await sleep(ctx.pageDelayMs);
   } while (page <= totalPages);
   await ctx.log("info", `Order sync finished: ${stats.created} created, ${stats.updated} updated, ${stats.unchanged} unchanged, ${stats.ignored} ignored, ${stats.failed} failed`);

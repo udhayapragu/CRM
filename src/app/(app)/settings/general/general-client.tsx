@@ -1,5 +1,8 @@
 "use client";
 import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { api } from "@/lib/client-api";
+import { useToast } from "@/components/ui/toast";
 import { FlaskConical, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Field, Input, Select } from "@/components/ui/form";
@@ -22,6 +25,40 @@ export function SettingsForm({ settings }: { settings: AppSettings }) {
 
 export function DemoControls({ demoPresent, liveConnected }: { demoPresent: boolean; liveConnected: boolean }) {
   const { run, busy } = useAction();
+  const router = useRouter();
+  const toast = useToast();
+  const [progress, setProgress] = useState<number | null>(null);
+
+  const load = async () => {
+    setProgress(0);
+    try {
+      const base = await api<{ next: number; total: number }>("/api/demo", { body: { phase: "base" } });
+      let next = base.next;
+      while (next < base.total) {
+        let attempt = 0;
+        for (;;) {
+          try {
+            const r = await api<{ next: number }>("/api/demo", { body: { phase: "orders", offset: next } });
+            next = r.next;
+            break;
+          } catch (e) {
+            // Batches are idempotent, so a timed-out or failed batch is simply retried.
+            if (++attempt >= 3) throw e;
+          }
+        }
+        setProgress(Math.round((next / base.total) * 100));
+      }
+      await api("/api/demo", { body: { phase: "finish" } });
+      toast.success("Demo environment loaded");
+      router.refresh();
+    } catch (e) {
+      toast.error(`${(e as Error).message} — you can clear the partial demo data and try again.`);
+      router.refresh();
+    } finally {
+      setProgress(null);
+    }
+  };
+
   return demoPresent ? (
     <div>
       <p className="mb-3 text-sm text-muted">Demo data is currently loaded and labelled throughout the app. Clearing removes every demo product, order, stock item, ledger entry, supplier, onboarding item and member. Your users, settings and WordPress connection are kept.</p>
@@ -30,7 +67,8 @@ export function DemoControls({ demoPresent, liveConnected }: { demoPresent: bool
   ) : (
     <div>
       <p className="mb-3 text-sm text-muted">Explore every module with realistic sample data before connecting your website. Demo records are flagged and visibly labelled, and must be cleared before real data can be synchronised.</p>
-      <Button variant="gold" loading={busy} disabled={liveConnected} onClick={() => run("/api/demo", { method: "POST", success: "Demo environment loaded" })}><FlaskConical className="h-4 w-4" /> Load demo data</Button>
+      <Button variant="gold" loading={progress !== null} disabled={liveConnected} onClick={load}><FlaskConical className="h-4 w-4" /> {progress !== null ? `Loading demo data… ${progress}%` : "Load demo data"}</Button>
+      {progress !== null && <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-surface-3"><div className="h-full rounded-full bg-gradient-to-r from-brand to-gold transition-all" style={{ width: `${Math.max(4, progress)}%` }} /></div>}
       {liveConnected && <p className="mt-2 text-xs text-subtle">Unavailable while a live WordPress connection is enabled.</p>}
     </div>
   );

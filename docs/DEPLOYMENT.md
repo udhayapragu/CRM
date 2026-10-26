@@ -54,14 +54,37 @@ pm2 start "npm run worker" --name luxe-worker
 pm2 save
 ```
 
-## 5. Option C: Serverless (e.g. Vercel) + managed Postgres
+## 5. Option C: Vercel (step by step)
 
-The web app runs on serverless platforms, but there is no long-lived worker. Instead:
+The app runs on Vercel without a separate worker. If anything is missing, the site shows an **"Almost there"** page listing what to fix, instead of an error. You can also open `https://<your-site>/api/health` at any time to see which checks pass.
 
-- Schedule `POST https://<crm>/api/cron/tick` every 5 minutes with header `Authorization: Bearer $CRON_SECRET` (Vercel Cron, GitHub Actions, cron-job.org…).
-- Use a connection-pooling `DATABASE_URL` (PgBouncer / Neon pooled URL).
-- **Uploads:** serverless filesystems are ephemeral. Mount object storage, or replace `saveDocument`/`readDocument` in `src/server/services/onboarding.ts` with an S3-compatible client.
-- The in-memory rate limiter is per instance (see limitations).
+**1. Create the database (free)**
+- Vercel dashboard → your project → **Storage** → **Create Database** → **Neon (Serverless Postgres)** → pick the region closest to you → **Connect** it to the project.
+- This adds `DATABASE_URL` (and `DATABASE_URL_UNPOOLED`) automatically. If your integration only adds `POSTGRES_*` variables, add `DATABASE_URL` yourself with the value of `POSTGRES_PRISMA_URL`.
+
+**2. Put your app in the same region as the database** (important for speed)
+- Project → **Settings → Functions → Function Region** → choose the region you picked for the database (e.g. Mumbai `bom1` or Singapore `sin1`). Every page talks to the database many times, so a far-away database makes pages slow.
+
+**3. Add the remaining environment variables** (Project → Settings → Environment Variables)
+
+| Name | Value |
+|---|---|
+| `APP_URL` | `https://<your-project>.vercel.app` (your real address) |
+| `APP_ENCRYPTION_KEY` | copy the generated value shown on the "Almost there" page (or run the command in section 2) |
+| `SETUP_TOKEN` | copy the generated value shown on the "Almost there" page |
+| `CRON_SECRET` | any long random text (Vercel Cron sends it automatically) |
+| `TZ` | `Asia/Kolkata` (or your timezone) |
+
+**4. Redeploy**: Deployments → ⋯ on the latest → **Redeploy**. The build (`vercel-build`) runs `prisma migrate deploy` first, which creates or updates all database tables automatically, using the direct (non-pooled) URL when available.
+
+**5. Open the site**: you'll see the first-time setup screen. Enter your name, email, a password and the `SETUP_TOKEN`.
+
+**How background work runs on Vercel**
+- Long imports run in ~40-second slices (`SYNC_TIME_BUDGET_SECONDS`) that pause and resume at page boundaries, so Vercel's request time limit never cuts an import off. They keep progressing while the WordPress Sync page is open, and on every cron run.
+- `vercel.json` schedules `/api/cron/tick` **once a day** (the most the free Hobby plan allows). For syncing every few minutes, either upgrade, or use a free external scheduler such as cron-job.org to call `GET https://<site>/api/cron/tick` every 5–15 minutes with header `Authorization: Bearer <CRON_SECRET>`. WooCommerce webhooks keep orders up to date in real time regardless.
+- Demo data loads in small batches with a progress bar.
+- **Uploads:** Vercel's filesystem is temporary, so onboarding documents uploaded on Vercel are kept in `/tmp` and can disappear. For permanent document storage, host on a server with a disk (options A/B) or connect object storage (S3-compatible) in `src/server/services/onboarding.ts`.
+- Login rate limiting is per serverless instance (best effort on Vercel).
 
 ## 6. After deployment
 

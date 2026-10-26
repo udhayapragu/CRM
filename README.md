@@ -29,6 +29,8 @@ npm run dev               # http://localhost:3000
 npm run worker            # (second terminal) scheduled sync, retries, periodic alerts
 ```
 
+**Deploying to Vercel?** Follow the step-by-step guide in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#5-option-c-vercel-step-by-step). Missing configuration is shown on an "Almost there" page, and `/api/health` reports which checks pass.
+
 Or with Docker (PostgreSQL + web + worker): `cp .env.example .env`, fill in the secrets, then `docker compose up -d --build`.
 
 ### First launch

@@ -8,14 +8,33 @@
  * - `tick()` is called by `npm run worker` (long-running) or by POST /api/cron/tick (external cron).
  */
 import { hostname } from "os";
-import type { Prisma, SyncJob, SyncJobType, SyncTrigger } from "@prisma/client";
+import { after } from "next/server";
+import { Prisma, type SyncJob, type SyncJobType, type SyncTrigger } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { notify } from "@/server/services/notifications";
 import { runPeriodicChecks } from "@/server/services/periodic-checks";
 import { WordPressError } from "./client";
 import { buildAdapter, type AdapterDeps } from "./connection-service";
-import { syncOrders, syncProducts, type SyncStats } from "./sync-service";
+import { SyncPaused, syncOrders, syncProducts, type SyncStats } from "./sync-service";
+
+/**
+ * Time budget per invocation. On serverless hosts (Vercel) each request may only run ~60 s, so a
+ * long import is processed in slices: it pauses at a page boundary and the next invocation resumes.
+ * Set SYNC_TIME_BUDGET_SECONDS to override; 0 = unlimited (long-running worker).
+ */
+export function syncTimeBudgetMs() {
+  const raw = process.env.SYNC_TIME_BUDGET_SECONDS;
+  if (raw !== undefined && raw !== "") return Math.max(0, Number(raw) || 0) * 1000;
+  return process.env.VERCEL ? 40_000 : 0;
+}
+
+interface JobProgress {
+  phase: "products" | "orders";
+  page: number;
+  startedAt: string;
+  stats: Record<string, SyncStats>;
+}
 
 const WORKER_ID = `${hostname()}:${process.pid}`;
 const STALE_LOCK_MS = 30 * 60_000;
@@ -74,7 +93,7 @@ function isRetryable(e: unknown) {
   return e instanceof WordPressError ? e.retryable : !(e instanceof AppError);
 }
 
-export async function runJob(job: SyncJob, deps: AdapterDeps & { pageDelayMs?: number } = {}) {
+export async function runJob(job: SyncJob, deps: AdapterDeps & { pageDelayMs?: number; deadline?: number } = {}) {
   const connection = await prisma.wordPressConnection.findUnique({ where: { id: job.connectionId } });
   const log = async (level: "info" | "warn" | "error", message: string, context?: Prisma.InputJsonValue) => {
     await prisma.syncLog.create({ data: { jobId: job.id, level, message: message.slice(0, 2000), context } });
@@ -89,21 +108,43 @@ export async function runJob(job: SyncJob, deps: AdapterDeps & { pageDelayMs?: n
     return;
   }
 
-  const startedAt = new Date();
-  const stats: Record<string, SyncStats> = {};
+  const progress = (job.progress ?? null) as JobProgress | null;
+  const startedAt = progress ? new Date(progress.startedAt) : new Date();
+  const stats: Record<string, SyncStats> = progress?.stats ?? {};
+  const budget = syncTimeBudgetMs();
+  const deadline = deps.deadline ?? (budget ? Date.now() + budget : undefined);
   try {
     const adapter = buildAdapter(connection, deps);
     const ctx = { connection, adapter, log, pageDelayMs: deps.pageDelayMs ?? 250, sleep: deps.sleep, trigger: job.trigger };
     const full = job.fullResync || job.trigger === "INITIAL";
-    if (job.type === "PRODUCTS" || job.type === "FULL") stats.products = await syncProducts(ctx, { full: full || !connection.productsCursor });
-    if (job.type === "ORDERS" || job.type === "FULL") stats.orders = await syncOrders(ctx, { full: full || !connection.ordersCursor });
+    const wantProducts = job.type === "PRODUCTS" || job.type === "FULL";
+    const wantOrders = job.type === "ORDERS" || job.type === "FULL";
+    const productsDone = progress?.phase === "orders";
+    if (wantProducts && !productsDone) {
+      stats.products = await syncProducts(ctx, {
+        full: full || !connection.productsCursor,
+        startPage: progress?.phase === "products" ? progress.page : 1,
+        stats: progress?.phase === "products" ? stats.products : undefined,
+        runStartedAt: startedAt,
+        deadline,
+      });
+    }
+    if (wantOrders) {
+      stats.orders = await syncOrders(ctx, {
+        full: full || !connection.ordersCursor,
+        startPage: progress?.phase === "orders" ? progress.page : 1,
+        stats: progress?.phase === "orders" ? stats.orders : undefined,
+        runStartedAt: startedAt,
+        deadline,
+      });
+    }
 
     const failed = Object.values(stats).reduce((s, x) => s + x.failed, 0);
     const cursor = new Date(startedAt.getTime() - CURSOR_OVERLAP_MS);
     await prisma.$transaction([
       prisma.syncJob.update({
         where: { id: job.id },
-        data: { status: failed ? "PARTIAL" : "SUCCEEDED", finishedAt: new Date(), stats: stats as unknown as Prisma.InputJsonValue, lockedAt: null, error: failed ? `${failed} record(s) failed — see logs` : null },
+        data: { status: failed ? "PARTIAL" : "SUCCEEDED", finishedAt: new Date(), stats: stats as unknown as Prisma.InputJsonValue, progress: Prisma.DbNull, lockedAt: null, error: failed ? `${failed} record(s) failed — see logs` : null },
       }),
       prisma.wordPressConnection.update({
         where: { id: connection.id },
@@ -132,6 +173,16 @@ export async function runJob(job: SyncJob, deps: AdapterDeps & { pageDelayMs?: n
       });
     }
   } catch (e) {
+    if (e instanceof SyncPaused) {
+      const saved: JobProgress = { phase: e.phase, page: e.nextPage, startedAt: startedAt.toISOString(), stats: { ...stats, [e.phase]: e.stats } };
+      await log("info", `Time budget reached — paused before ${e.phase} page ${e.nextPage}; the next run continues from there`);
+      await prisma.syncJob.update({
+        where: { id: job.id },
+        // A pause is not a failed attempt.
+        data: { status: "QUEUED", runAfter: new Date(), lockedAt: null, lockedBy: null, attempts: { decrement: 1 }, progress: saved as unknown as Prisma.InputJsonValue, stats: saved.stats as unknown as Prisma.InputJsonValue },
+      });
+      return { paused: true };
+    }
     const message = e instanceof Error ? e.message : String(e);
     await log("error", `Sync failed: ${message}`);
     const retry = isRetryable(e) && job.attempts < job.maxAttempts;
@@ -186,11 +237,15 @@ export async function scheduleDueSyncs() {
 }
 
 export async function processQueue(maxJobs = 5, deps: AdapterDeps & { pageDelayMs?: number } = {}) {
+  const budget = syncTimeBudgetMs();
+  const deadline = budget ? Date.now() + budget : undefined;
   let processed = 0;
   while (processed < maxJobs) {
+    // Never start (or resume) a job without a useful slice of time left.
+    if (deadline && deadline - Date.now() < 8_000) break;
     const job = await claimNextJob();
     if (!job) break;
-    await runJob(job, deps);
+    await runJob(job, { ...deps, deadline });
     processed++;
   }
   return processed;
@@ -210,9 +265,20 @@ export async function tick(opts: { maxJobs?: number } = {}) {
   return { recovered, scheduled, processed, checks };
 }
 
-/** Kick the queue from a web request without blocking the response (best effort). */
+/**
+ * Process queued jobs after the response has been sent. Uses Next.js `after()` so serverless hosts
+ * keep the function alive for the work; falls back to a timer outside a request (worker, tests).
+ */
 export function kickQueue() {
-  setTimeout(() => {
-    processQueue(3).catch((e) => console.error("[sync] background processing failed", e));
-  }, 10);
+  const work = () => processQueue(3).then(() => undefined, (e) => console.error("[sync] background processing failed", e));
+  try {
+    after(work);
+  } catch {
+    setTimeout(work, 10);
+  }
+}
+
+/** True when a job is waiting to run now (used to continue paused imports while the page is open). */
+export async function hasRunnableJob() {
+  return (await prisma.syncJob.count({ where: { status: "QUEUED", runAfter: { lte: new Date() } } })) > 0;
 }

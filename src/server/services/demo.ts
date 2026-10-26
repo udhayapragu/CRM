@@ -52,7 +52,15 @@ const NAMES = ["Aarav Mehta", "Diya Kapoor", "Kabir Singh", "Ananya Iyer", "Viha
 const CITIES = ["Mumbai", "Bengaluru", "New Delhi", "Chennai", "Hyderabad", "Pune", "Kolkata", "Jaipur"];
 const COURIERS = ["Blue Dart", "Delhivery", "DTDC", "Ecom Express"];
 
-export async function loadDemoData(userId: string) {
+/** Total number of demo orders created by the batched order phase. */
+export const DEMO_ORDER_COUNT = 64;
+const DEMO_BATCH = 4;
+
+/**
+ * Phase 1 — catalogue, stock, suppliers, rules, onboarding and members.
+ * Demo loading is split into small phases so each request stays well inside serverless time limits.
+ */
+export async function loadDemoBase(userId: string) {
   if (await prisma.wordPressConnection.count({ where: { enabled: true } })) {
     throw new AppError("A live WordPress connection is enabled. Demo data cannot be loaded alongside real data.", 409, "LIVE_CONNECTION");
   }
@@ -64,7 +72,6 @@ export async function loadDemoData(userId: string) {
   const rand = rng(42);
   const pick = <T,>(arr: readonly T[]) => arr[Math.floor(rand() * arr.length)];
   const now = new Date();
-  const actor = { userId };
 
   // Suppliers
   const suppliers = await Promise.all(
@@ -139,14 +146,63 @@ export async function loadDemoData(userId: string) {
     }
   });
 
-  // Orders across the last 30 days
-  const plan: OrderStatus[] = [];
-  for (let i = 0; i < 64; i++) {
-    const r = rand();
-    plan.push(r < 0.34 ? "DELIVERED" : r < 0.5 ? "DISPATCHED" : r < 0.6 ? "READY_TO_DISPATCH" : r < 0.7 ? "PROCESSING" : r < 0.8 ? "CONFIRMED" : r < 0.87 ? "NEW" : r < 0.91 ? "PENDING_PAYMENT" : r < 0.95 ? "CANCELLED" : r < 0.97 ? "ON_HOLD" : "RETURNED");
+  // Onboarding pipeline
+  const stages = await prisma.onboardingStage.findMany({ orderBy: { position: "asc" } });
+  const ideas = ["Velvet Fig Eau de Parfum", "Saffron Rose Candle", "Oud Wood Travel Spray", "Lotus Bloom Body Oil", "Black Orchid Gift Box", "Citrus Noir Cologne", "Sandalwood Beard Oil", "Moonlit Musk Roll-on", "Cashmere Amber Diffuser", "Ivory Neroli Hand Cream", "Ruby Peony Mist", "Platinum Vetiver EDP"];
+  for (const [i, title] of ideas.entries()) {
+    const stage = stages[i % (stages.length - 1)];
+    const item = await prisma.onboardingItem.create({
+      data: { title, sku: `NEW-${100 + i}`, category: pick(["Perfume", "Body Care", "Home Fragrance", "Gift Sets"]), stageId: stage.id, priority: pick(["LOW", "MEDIUM", "HIGH", "URGENT"]), ownerId: userId, dueDate: addDays(now, Math.round(rand() * 40) - 5), isDemo: true, description: "Demo onboarding item", stageEnteredAt: addDays(now, -Math.round(rand() * 12)) },
+    });
+    await prisma.onboardingTask.createMany({
+      data: [
+        { itemId: item.id, title: "Finalise product description & notes", done: rand() > 0.4, assigneeId: userId },
+        { itemId: item.id, title: "Upload compliance documents (MSDS, label approval)", done: rand() > 0.6 },
+        { itemId: item.id, title: "Approve packaging artwork", done: rand() > 0.7 },
+      ],
+    });
   }
-  let n = 1001;
-  for (const target of plan) {
+  const rejected = stages.find((s) => s.key === "REJECTED_ON_HOLD");
+  if (rejected) await prisma.onboardingItem.create({ data: { title: "Neon Citrus Splash", stageId: rejected.id, holdReason: "Supplier could not meet IFRA compliance (demo)", isDemo: true, priority: "LOW" } });
+
+  // MLM sample members (no commissions are generated unless the module is enabled with reviewed rules)
+  const root = await prisma.member.create({ data: { referralCode: "DEMOROOT1", name: "Asha Rao (demo)", status: "ACTIVE", activatedAt: addDays(now, -90), isDemo: true } });
+  const m2 = await prisma.member.create({ data: { referralCode: "DEMOVIK22", name: "Vikram Shah (demo)", status: "ACTIVE", sponsorId: root.id, activatedAt: addDays(now, -60), isDemo: true } });
+  await prisma.member.create({ data: { referralCode: "DEMONEH33", name: "Neha Kulkarni (demo)", status: "PENDING", sponsorId: m2.id, isDemo: true } });
+
+  await prisma.appSetting.upsert({ where: { key: "demoLoading" }, create: { key: "demoLoading", value: now.toISOString() }, update: { value: now.toISOString() } });
+  return { next: 0, total: DEMO_ORDER_COUNT };
+}
+
+function demoPlan(): OrderStatus[] {
+  const rand = rng(7);
+  return Array.from({ length: DEMO_ORDER_COUNT }, () => {
+    const r = rand();
+    return r < 0.34 ? "DELIVERED" : r < 0.5 ? "DISPATCHED" : r < 0.6 ? "READY_TO_DISPATCH" : r < 0.7 ? "PROCESSING" : r < 0.8 ? "CONFIRMED" : r < 0.87 ? "NEW" : r < 0.91 ? "PENDING_PAYMENT" : r < 0.95 ? "CANCELLED" : r < 0.97 ? "ON_HOLD" : "RETURNED";
+  });
+}
+
+/**
+ * Phase 2 — create demo orders [offset, offset + limit) and drive them through the real
+ * pack / dispatch / deliver / return services. Deterministic per index and idempotent: an order
+ * that already exists is skipped, so a retried batch never duplicates data.
+ */
+export async function loadDemoOrders(userId: string, offset: number, limit = DEMO_BATCH) {
+  const loading = await prisma.appSetting.findUnique({ where: { key: "demoLoading" } });
+  if (!loading) throw new AppError("Start loading demo data first", 409, "DEMO_NOT_STARTED");
+  const bySku = new Map((await prisma.product.findMany({ where: { isDemo: true } })).map((p) => [p.sku, p]));
+  const products = PRODUCTS.map((p) => bySku.get(p.sku)!);
+  if (products.some((p) => !p)) throw new AppError("Demo catalogue is incomplete — clear demo data and try again", 409, "DEMO_INCOMPLETE");
+  const plan = demoPlan();
+  const now = new Date();
+  const actor = { userId };
+  const endIdx = Math.min(DEMO_ORDER_COUNT, offset + limit);
+  for (let index = offset; index < endIdx; index++) {
+    const number = `D${1001 + index}`;
+    if (await prisma.order.findFirst({ where: { number, isDemo: true }, select: { id: true } })) continue;
+    const target = plan[index];
+    const rand = rng(1000 + index);
+    const pick = <T,>(arr: readonly T[]) => arr[Math.floor(rand() * arr.length)];
     const daysAgo = Math.floor(rand() * 30);
     const orderDate = addDays(now, -daysAgo);
     orderDate.setHours(9 + Math.floor(rand() * 11), Math.floor(rand() * 60));
@@ -162,7 +218,7 @@ export async function loadDemoData(userId: string) {
     const paid = !["PENDING_PAYMENT", "NEW"].includes(target) || rand() > 0.5;
     const order = await prisma.order.create({
       data: {
-        number: `D${n++}`,
+        number,
         source: "DEMO",
         isDemo: true,
         customerName: name,
@@ -217,36 +273,24 @@ export async function loadDemoData(userId: string) {
     };
     await advance();
   }
-  // One order flagged for attention
+  return { next: endIdx, total: DEMO_ORDER_COUNT, done: endIdx >= DEMO_ORDER_COUNT };
+}
+
+/** Phase 3 — final touches; marks the demo environment as loaded. */
+export async function finishDemo(userId: string) {
   const flagged = await prisma.order.findFirst({ where: { isDemo: true, status: "CONFIRMED" } });
   if (flagged) await prisma.order.update({ where: { id: flagged.id }, data: { needsAttention: true, attentionReason: "Customer requested gift wrapping and a handwritten note (demo)" } });
-
-  // Onboarding pipeline
-  const stages = await prisma.onboardingStage.findMany({ orderBy: { position: "asc" } });
-  const ideas = ["Velvet Fig Eau de Parfum", "Saffron Rose Candle", "Oud Wood Travel Spray", "Lotus Bloom Body Oil", "Black Orchid Gift Box", "Citrus Noir Cologne", "Sandalwood Beard Oil", "Moonlit Musk Roll-on", "Cashmere Amber Diffuser", "Ivory Neroli Hand Cream", "Ruby Peony Mist", "Platinum Vetiver EDP"];
-  for (const [i, title] of ideas.entries()) {
-    const stage = stages[i % (stages.length - 1)];
-    const item = await prisma.onboardingItem.create({
-      data: { title, sku: `NEW-${100 + i}`, category: pick(["Perfume", "Body Care", "Home Fragrance", "Gift Sets"]), stageId: stage.id, priority: pick(["LOW", "MEDIUM", "HIGH", "URGENT"]), ownerId: userId, dueDate: addDays(now, Math.round(rand() * 40) - 5), isDemo: true, description: "Demo onboarding item", stageEnteredAt: addDays(now, -Math.round(rand() * 12)) },
-    });
-    await prisma.onboardingTask.createMany({
-      data: [
-        { itemId: item.id, title: "Finalise product description & notes", done: rand() > 0.4, assigneeId: userId },
-        { itemId: item.id, title: "Upload compliance documents (MSDS, label approval)", done: rand() > 0.6 },
-        { itemId: item.id, title: "Approve packaging artwork", done: rand() > 0.7 },
-      ],
-    });
-  }
-  const rejected = stages.find((s) => s.key === "REJECTED_ON_HOLD");
-  if (rejected) await prisma.onboardingItem.create({ data: { title: "Neon Citrus Splash", stageId: rejected.id, holdReason: "Supplier could not meet IFRA compliance (demo)", isDemo: true, priority: "LOW" } });
-
-  // MLM sample members (no commissions are generated unless the module is enabled with reviewed rules)
-  const root = await prisma.member.create({ data: { referralCode: "DEMOROOT1", name: "Asha Rao (demo)", status: "ACTIVE", activatedAt: addDays(now, -90), isDemo: true } });
-  const m2 = await prisma.member.create({ data: { referralCode: "DEMOVIK22", name: "Vikram Shah (demo)", status: "ACTIVE", sponsorId: root.id, activatedAt: addDays(now, -60), isDemo: true } });
-  await prisma.member.create({ data: { referralCode: "DEMONEH33", name: "Neha Kulkarni (demo)", status: "PENDING", sponsorId: m2.id, isDemo: true } });
-
-  await prisma.appSetting.upsert({ where: { key: "demoLoadedAt" }, create: { key: "demoLoadedAt", value: now.toISOString() }, update: { value: now.toISOString() } });
+  const now = new Date().toISOString();
+  await prisma.appSetting.upsert({ where: { key: "demoLoadedAt" }, create: { key: "demoLoadedAt", value: now }, update: { value: now } });
+  await prisma.appSetting.deleteMany({ where: { key: "demoLoading" } });
   await audit({ userId, action: "demo.load", entityType: "System", summary: "Demo environment loaded" });
+}
+
+/** Load the whole demo environment in one go (CLI / tests). */
+export async function loadDemoData(userId: string) {
+  await loadDemoBase(userId);
+  for (let o = 0; o < DEMO_ORDER_COUNT; o += 16) await loadDemoOrders(userId, o, 16);
+  await finishDemo(userId);
 }
 
 export async function clearDemoData(userId: string) {
@@ -269,7 +313,7 @@ export async function clearDemoData(userId: string) {
       c.suppliers = (await tx.supplier.deleteMany({ where: { isDemo: true } })).count;
       c.onboarding = (await tx.onboardingItem.deleteMany({ where: { isDemo: true } })).count;
       c.notifications = (await tx.notification.deleteMany({ where: { OR: [{ isDemo: true }, { dedupeKey: { startsWith: "pending:" } }] } })).count;
-      await tx.appSetting.deleteMany({ where: { key: "demoLoadedAt" } });
+      await tx.appSetting.deleteMany({ where: { key: { in: ["demoLoadedAt", "demoLoading"] } } });
       return c;
     },
     { timeout: 60_000 },

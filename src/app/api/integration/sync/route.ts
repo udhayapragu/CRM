@@ -6,6 +6,8 @@ import { audit } from "@/server/audit";
 import { getPrimaryConnection } from "@/server/integrations/wordpress/connection-service";
 import { enqueueSync, kickQueue } from "@/server/integrations/wordpress/job-runner";
 
+export const maxDuration = 60;
+
 /** "Sync now": queue a job and start processing it in the background. */
 export const POST = apiRoute({ permission: "integration:manage" }, async ({ req, user, ip }) => {
   if (!rateLimit(`sync:${user.id}`, 6, 60_000).ok) throw new AppError("Too many sync requests — please wait a minute", 429, "RATE_LIMITED");

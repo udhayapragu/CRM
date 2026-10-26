@@ -25,7 +25,8 @@ export const env = {
     return bool(process.env.ALLOW_INSECURE_WORDPRESS_HTTP, false);
   },
   get uploadDir() {
-    return process.env.UPLOAD_DIR || "./uploads";
+    // Serverless filesystems are read-only except /tmp (and /tmp is not persistent) — see docs/DEPLOYMENT.md.
+    return process.env.UPLOAD_DIR || (process.env.VERCEL ? "/tmp/luxe-uploads" : "./uploads");
   },
   get uploadMaxBytes() {
     return Math.max(1, Number(process.env.UPLOAD_MAX_MB || 15)) * 1024 * 1024;

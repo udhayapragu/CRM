@@ -1,3 +1,5 @@
+import { systemReadiness } from "@/lib/system-check";
+import { SetupRequired } from "@/components/setup-required";
 import Link from "next/link";
 import { AlertTriangle, FlaskConical, Unplug } from "lucide-react";
 import { requirePageUser } from "@/lib/auth/session";
@@ -11,6 +13,8 @@ import { getPrimaryConnection, publicConnection } from "@/server/integrations/wo
 export const dynamic = "force-dynamic";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
+  const sys = await systemReadiness();
+  if (!sys.ok) return <SetupRequired problems={sys.problems} />;
   const user = await requirePageUser();
   const [settings, demo, conn] = await Promise.all([getSettings(), hasDemoData(), getPrimaryConnection()]);
   const c = conn ? publicConnection(conn) : null;

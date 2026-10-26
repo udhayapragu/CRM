@@ -189,6 +189,8 @@ model SyncJob {
   lockedAt     DateTime?
   lockedBy     String?
   stats        Json?
+  // Resume point for time-boxed runs (serverless): { phase, page, startedAt, stats }
+  progress     Json?
   error        String?
   requestedBy  String?
   retryOfId    String?

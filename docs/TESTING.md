@@ -23,8 +23,9 @@ WordPress/WooCommerce is simulated by an in-memory fake (`tests/fake-woo.ts`) im
 ✓ tests/reports.test.ts           (6 tests)
 ✓ tests/wordpress-client.test.ts (10 tests)
 ✓ tests/mappers.test.ts          (11 tests)
-Test Files  8 passed (8)
-     Tests  90 passed (90)
+✓ tests/serverless.test.ts        (4 tests)   time-boxed sync resume, phased demo, readiness, pooled URLs
+Test Files  9 passed (9)
+     Tests  94 passed (94)
 ```
 
 `npm run typecheck` ✔ · `npm run lint` ✔ (0 warnings) · `npm run build` ✔
@@ -68,7 +69,8 @@ All 24 application pages rendered with HTTP 200 and no browser console errors, i
 3. **Quantities are whole numbers.** Track liquids and powders in base units (ml, g).
 4. **Physical stock is not pushed back to WooCommerce** (by design: read-only integration). Website and physical stock are compared and mismatches raise notifications.
 5. **Rate limiting is in-memory per process.** With multiple web instances, use a shared store (Redis); see DEPLOYMENT.md.
-6. **Uploads are stored on local disk.** Use a persistent volume, or swap in S3 for serverless hosting.
+6. **Uploads are stored on local disk.** Use a persistent volume, or swap in S3 for serverless hosting. On Vercel, uploads go to `/tmp` and are **not permanent**.
+13. **Vercel Hobby cron runs once a day.** Use webhooks plus an external scheduler (see DEPLOYMENT.md) for frequent scheduled syncs.
 7. **Email/WhatsApp notifications are not implemented.** In-app notifications are complete. `.env.example` reserves `SMTP_URL` / `WHATSAPP_WEBHOOK_URL`, but no sender is wired up, because no credentials or provider were specified.
 8. **Variations:** physical stock can be tracked per variant, but packaging consumption rules are defined per parent product.
 9. **Demo data** back-dates opening stock and orders, but ledger entries for demo dispatches carry the load time, so the demo low-stock trend is flat before that day.

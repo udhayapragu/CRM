@@ -5,6 +5,8 @@ import { getPrimaryConnection, publicConnection, setConnectionEnabled } from "@/
 import { enqueueSync, kickQueue } from "@/server/integrations/wordpress/job-runner";
 import { prisma } from "@/lib/db";
 
+export const maxDuration = 60;
+
 export const POST = apiRoute({ permission: "integration:manage" }, async ({ req, user, ip }) => {
   const { enabled } = await parseBody(req, z.object({ enabled: z.boolean() }));
   const c = await getPrimaryConnection();

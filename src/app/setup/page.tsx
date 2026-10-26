@@ -1,3 +1,5 @@
+import { systemReadiness } from "@/lib/system-check";
+import { SetupRequired } from "@/components/setup-required";
 import { redirect } from "next/navigation";
 import { env } from "@/lib/env";
 import { needsSetup } from "@/server/services/users";
@@ -8,6 +10,8 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "First-time setup" };
 
 export default async function SetupPage() {
+  const sys = await systemReadiness();
+  if (!sys.ok) return <SetupRequired problems={sys.problems} />;
   if (!(await needsSetup())) redirect("/login");
   return (
     <div className="relative grid min-h-screen place-items-center overflow-hidden px-4 py-10">
